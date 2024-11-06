@@ -1,54 +1,52 @@
 pipeline {
-    agent any 
-    
-    tools {
-        jdk 'jdk17' 
-        maven 'maven3'
-    }
-    
+    agent any
+
     environment {
-        SCANNER_HOME = tool 'sonar-scanner'
+        IMAGE_NAME = 'dind-test-image'
+        CONTAINER_NAME = 'dind-test-container'
     }
-    
+
     stages {
-        
-        stage("Git Checkout") {
+        stage('Check Docker Version') {
             steps {
-                echo "checked out decleratively"
-            }
-        }
-        
-        stage("Compile") {
-            steps {
-                sh "mvn clean compile"
-            }
-        }
-        
-        stage("Test Cases") {
-            steps {
-                sh "mvn test"
-            }
-        }
-        
-        stage("Sonarqube Analysis") {
-            steps {
-                withSonarQubeEnv('sonar-scanner') {
-                    sh '''$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=maven \
-                    -Dsonar.java.binaries=. \
-                    -Dsonar.projectKey=maven'''
+                script {
+                    echo "Testing Docker-in-Docker setup..."
+                    sh 'docker --version'
                 }
             }
         }
-        stage("OWASP Dependency Check"){
-            steps{
-                dependencyCheck additionalArguments: '--scan ./ --format HTML ', odcInstallation: 'dp'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo "Building a test Docker image"
+                    sh '''
+                    cat <<EOF > Dockerfile
+                    FROM alpine:latest
+                    CMD ["echo", "Hello from Docker-in-Docker!"]
+                    EOF
+                    docker build -t ${IMAGE_NAME} .
+                    '''
+                }
             }
         }
-        
-        stage("Build") {
+
+        stage('Run Docker Container') {
             steps {
-                sh "mvn clean install"
+                script {
+                    echo "Running a test container"
+                    sh "docker run --name ${CONTAINER_NAME} ${IMAGE_NAME}"
+                }
+            }
+        }
+
+        stage('Clean Up') {
+            steps {
+                script {
+                    echo "Cleaning up test resources"
+                    sh "docker rm ${CONTAINER_NAME} || true"
+                    sh "docker rmi ${IMAGE_NAME} || true"
+                }
             }
         }
     }
