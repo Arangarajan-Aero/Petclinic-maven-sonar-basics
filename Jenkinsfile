@@ -20,7 +20,7 @@ pipeline {
     stages {
         stage("Git Checkout") {
             steps {
-                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/Arangarajan-Aero/spring-petclinic.git'
+                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/Arangarajan-Aero/Petclinic-maven-sonar-basics.git'
             }
         }
         
@@ -186,7 +186,7 @@ def waitForQualityGate() {
     timeout(time: 1, unit: 'HOURS') {
         def result
         retry(5) {
-            result = sh(script: "curl -s -u ${env.SONAR_TOKEN}: http://3.6.37.222:9000/api/qualitygates/project_status?projectKey=Petclinic", returnStdout: true)
+            result = sh(script: "curl -s -u ${env.SONAR_TOKEN}: http://65.0.133.89:9000/api/qualitygates/project_status?projectKey=Petclinic", returnStdout: true)
             def json = readJSON(text: result)
             if (json.projectStatus.status != 'OK') {
                 error "SonarQube Quality Gate failed with status: ${json.projectStatus.status}"
