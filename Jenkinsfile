@@ -1,82 +1,197 @@
 pipeline {
     agent any 
-    
-    tools{
-        jdk 'jdk11'
-        maven 'maven3'
+
+    tools {
+        maven 'maven' // Define the Maven tool
     }
     
     environment {
-        SCANNER_HOME=tool 'sonar-scanner'
+        SCANNER_HOME = tool 'sonarqube-01' // Define SonarQube scanner tool
+        SONAR_TOKEN = credentials('sonar-qube') // Token for SonarQube authentication
+        DOCKER_IMAGE = 'aero1602/maven-application' // Docker image name
+        DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT}" // Docker image tag
+        AWS_REGION = 'ap-south-1' // AWS region for ECR
+        ECR_REPOSITORY = '905418475780.dkr.ecr.ap-south-1.amazonaws.com/devsecops/maven' // ECR repository URL
+        EMAIL_RECIPIENTS = 'arangarajan16.002@gmail.com' // Define your email recipients here
+        SLACK_CHANNEL = '#alert' // Define your Slack channel here
+        SLACK_CREDENTIALS_ID = 'slack-webhook' // Jenkins credentials ID for Slack
     }
     
-    stages{
-        
-        stage("Git Checkout"){
-            steps{
-                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/jaiswaladi246/Petclinic.git'
+    stages {
+        stage("Git Checkout") {
+            steps {
+                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/Arangarajan-Aero/spring-petclinic.git'
             }
         }
         
-        stage("Compile"){
-            steps{
-                sh "mvn clean compile"
+        stage("Compile") {
+            steps {
+                sh "mvn clean compile" // Compile the application
             }
         }
         
-         stage("Test Cases"){
-            steps{
-                sh "mvn test"
+        stage("Test Cases") {
+            steps {
+                sh "mvn test" // Run tests
             }
         }
         
-        stage("Sonarqube Analysis "){
-            steps{
-                withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Petclinic \
-                    -Dsonar.java.binaries=. \
-                    -Dsonar.projectKey=Petclinic '''
-    
-                }
-            }
-        }
-        
-        stage("OWASP Dependency Check"){
-            steps{
-                dependencyCheck additionalArguments: '--scan ./ --format HTML ', odcInstallation: 'DP'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-            }
-        }
-        
-         stage("Build"){
-            steps{
-                sh " mvn clean install"
-            }
-        }
-        
-        stage("Docker Build & Push"){
-            steps{
-                script{
-                   withDockerRegistry(credentialsId: '58be877c-9294-410e-98ee-6a959d73b352', toolName: 'docker') {
-                        
-                        sh "docker build -t image1 ."
-                        sh "docker tag image1 adijaiswal/pet-clinic123:latest "
-                        sh "docker push adijaiswal/pet-clinic123:latest "
+        stage("SonarQube Analysis") {
+            steps {
+                script {
+                    def projectName = 'Petclinic'
+                    def projectKey = 'Petclinic'
+                    def coverageThreshold = '80'
+                    withSonarQubeEnv('sonar-qube') {
+                        sh """
+                            $SCANNER_HOME/bin/sonar-scanner \
+                            -Dsonar.projectName=${projectName} \
+                            -Dsonar.java.binaries=. \
+                            -Dsonar.projectKey=${projectKey} \
+                            -Dsonar.coverage.exclusions=**/*Test.class \
+                            -Dsonar.qualitygate.wait=true \
+                            -Dsonar.security.hotspots.enable=true \
+                            -Dsonar.issue.severity=high \
+                            -Dsonar.coverage.new=${coverageThreshold}
+                        """
                     }
                 }
             }
         }
         
-        stage("TRIVY"){
-            steps{
-                sh " trivy image adijaiswal/pet-clinic123:latest"
+        stage("OWASP Dependency Check") {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --format ALL', 
+                                odcInstallation: 'dp-check', 
+                                stopBuild: true  
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+
+        stage("Quality Gate") {
+            steps {
+                script {
+                    timeout(time: 60, unit: 'MINUTES') {
+                        def qg = waitForQualityGate()
+                        if (qg.status != 'OK') {
+                            error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage("Build") {
+            steps {
+                sh "mvn clean install" // Build the application
             }
         }
         
-        stage("Deploy To Tomcat"){
-            steps{
-                sh "cp  /var/lib/jenkins/workspace/CI-CD/target/petclinic.war /opt/apache-tomcat-9.0.65/webapps/ "
+        stage("Dockerfile Linting with Hadolint") {
+            steps {
+                script {
+                    if (fileExists('Dockerfile')) {
+                        echo 'Dockerfile found, running Hadolint...'
+                        sh """
+                            docker run --rm -v \$(pwd):/workspace hadolint/hadolint hadolint /workspace/Dockerfile > hadolint_report.txt || echo 'Hadolint encountered issues, see hadolint_report.txt.'
+                        """
+                        archiveArtifacts artifacts: 'hadolint_report.txt', allowEmptyArchive: true // Archive Hadolint report
+                    } else {
+                        echo 'No Dockerfile found. Skipping Hadolint linting stage.'
+                    }
+                }
             }
+        }
+
+        stage("Build Docker Image") {
+            steps {
+                script {
+                    sh "docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} ." // Build Docker image
+                    echo "Docker image built successfully"
+                }
+            }
+        }
+
+        stage("Docker Image Vulnerability Scanning with Trivy") {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh """
+                        trivy image --no-progress --exit-code 1 --severity HIGH,CRITICAL --format json -o trivy_report.json ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        trivy image --format pdf -o trivy_report.pdf ${DOCKER_IMAGE}:${DOCKER_TAG}
+                    """
+                    echo "Trivy scan completed. Reports generated."
+                    archiveArtifacts artifacts: 'trivy_report.pdf', allowEmptyArchive: true // Archive Trivy report
+                }
+            }
+        }
+
+        stage("Push to ECR") {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aces-key']]) {
+                    script {
+                        // Login to ECR
+                        sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY}"
+                        
+                        // Tag the Docker image for ECR
+                        sh "docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${ECR_REPOSITORY}:${DOCKER_TAG}"
+                        
+                        // Push the Docker image to ECR
+                        sh "docker push ${ECR_REPOSITORY}:${DOCKER_TAG}"
+                        echo "Docker image ${DOCKER_IMAGE}:${DOCKER_TAG} pushed to ECR successfully"
+                    }
+                }
+            }
+        }
+    } 
+
+    post {
+        always {
+            script {
+                // Define email content
+                def subject = "Build #${env.BUILD_NUMBER} - ${currentBuild.currentResult}"
+                def body = """
+                <p>Build Status: ${currentBuild.currentResult}</p>
+                <p>Commit ID: ${env.GIT_COMMIT}</p>
+                <p>Build Link: <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
+                <p>Triggered By: ${env.BUILD_USER}</p>
+                <p>Reports:</p>
+                <ul>
+                    <li><a href="${env.BUILD_URL}artifact/hadolint_report.txt">Hadolint Report</a></li>
+                    <li><a href="${env.BUILD_URL}artifact/trivy_report.pdf">Trivy Report</a></li>
+                    <li><a href="${env.BUILD_URL}artifact/dependency-check-report.xml">OWASP Dependency Check Report</a></li>
+                </ul>
+                """
+
+                // Send email notification
+                emailext(
+                    to: EMAIL_RECIPIENTS,
+                    subject: subject,
+                    body: body,
+                    mimeType: 'text/html'
+                )
+
+                // Send Slack notification
+                slackSend(channel: SLACK_CHANNEL, 
+                          message: "Build *#${env.BUILD_NUMBER}* - ${currentBuild.currentResult} \n" +
+                                   "Commit ID: `${env.GIT_COMMIT}` \n" +
+                                   "Build Link: <${env.BUILD_URL}|Click here> \n" +
+                                   "Triggered By: ${env.BUILD_USER}", 
+                          credentialsId: SLACK_CREDENTIALS_ID)
+            }
+        }
+    }
+}
+
+def waitForQualityGate() {
+    timeout(time: 1, unit: 'HOURS') {
+        def result
+        retry(5) {
+            result = sh(script: "curl -s -u ${env.SONAR_TOKEN}: http://3.6.37.222:9000/api/qualitygates/project_status?projectKey=Petclinic", returnStdout: true)
+            def json = readJSON(text: result)
+            if (json.projectStatus.status != 'OK') {
+                error "SonarQube Quality Gate failed with status: ${json.projectStatus.status}"
+            }
+            return json.projectStatus
         }
     }
 }
