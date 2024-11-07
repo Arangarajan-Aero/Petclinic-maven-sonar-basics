@@ -16,6 +16,13 @@ pipeline {
         SLACK_CHANNEL = '#alert' // Define your Slack channel here
         SLACK_CREDENTIALS_ID = 'slack-webhook' // Jenkins credentials ID for Slack
     }
+    parameters {
+        choice(
+            name: 'SCAN_TYPE',
+            choices: ['Baseline', 'API', 'FULL'],
+            description: 'Select the type of ZAP scan you want to run.'
+        )
+    }
     
     stages {
         stage("Git Checkout") {
@@ -36,39 +43,21 @@ pipeline {
             }
         }
         
-        stage("SonarQube Analysis") {
+        stage("Sonarqube Analysis") {
             steps {
-                script {
-                    def projectName = 'Petclinic'
-                    def projectKey = 'Petclinic'
-                    def coverageThreshold = '80'
-                    withSonarQubeEnv('sonar-qube') {
-                        sh """
-                            $SCANNER_HOME/bin/sonar-scanner \
-                            -Dsonar.projectName=${projectName} \
-                            -Dsonar.java.binaries=. \
-                            -Dsonar.projectKey=${projectKey} \
-                            -Dsonar.coverage.exclusions=**/*Test.class \
-                            -Dsonar.qualitygate.wait=true \
-                            -Dsonar.security.hotspots.enable=true \
-                            -Dsonar.issue.severity=high \
-                            -Dsonar.coverage.new=${coverageThreshold}
-                        """
-                    }
+                withSonarQubeEnv('sonar-qube') {
+                    sh '''$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=devsecop \
+                    -Dsonar.java.binaries=. \
+                    -Dsonar.projectKey=devsecop \
+                    -Dsonar.coverage.exclusions=**/test/** \
+                    -Dsonar.coverage.minimumCoverage=80 \
+                    -Dsonar.security.hotspots=true \
+                    -Dsonar.issue.severity=HIGH
+                    '''
                 }
             }
         }
-        
-        stage("OWASP Dependency Check") {
-            steps {
-                dependencyCheck additionalArguments: '--scan ./ --format ALL', 
-                                odcInstallation: 'dp-check', 
-                                stopBuild: true  
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-            }
-        }
-
-        stage("Quality Gate") {
+             stage("Quality Gate") {
             steps {
                 script {
                     timeout(time: 60, unit: 'MINUTES') {
@@ -80,6 +69,16 @@ pipeline {
                 }
             }
         }
+        stage("OWASP Dependency Check") {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --format ALL', 
+                                odcInstallation: 'dp-check', 
+                                stopBuild: true  
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+
+   
 
         stage("Build") {
             steps {
@@ -112,15 +111,12 @@ pipeline {
             }
         }
 
-        stage("Docker Image Vulnerability Scanning with Trivy") {
+          stage('Docker Image Vulnerability Scanning') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    sh """
-                        trivy image --no-progress --exit-code 1 --severity HIGH,CRITICAL --format json -o trivy_report.json ${DOCKER_IMAGE}:${DOCKER_TAG}
-                        trivy image --format pdf -o trivy_report.pdf ${DOCKER_IMAGE}:${DOCKER_TAG}
-                    """
-                    echo "Trivy scan completed. Reports generated."
-                    archiveArtifacts artifacts: 'trivy_report.pdf', allowEmptyArchive: true // Archive Trivy report
+                script {
+                    sh 'trivy image --severity HIGH,CRITICAL --format table ${DOCKER_IMAGE}:${DOCKER_TAG} > trivy-report.txt'
+                    sh 'libreoffice --headless --convert-to pdf trivy-report.txt --outdir .'
+                    archiveArtifacts artifacts: 'trivy-report.pdf', allowEmptyArchive: false
                 }
             }
         }
@@ -142,56 +138,84 @@ pipeline {
                 }
             }
         }
+        stage('ZAP Scan') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    script {
+                        def zapScript
+                        def reportFile
+                        if (params.SCAN_TYPE == 'Baseline') {
+                            zapScript = 'zap-baseline.py'
+                            reportFile = 'zap_baseline_report.html'
+                        } else if (params.SCAN_TYPE == 'API') {
+                            zapScript = 'zap-api-scan.py'
+                            reportFile = 'zap_api_report.html'
+                        } else if (params.SCAN_TYPE == 'FULL') {
+                            zapScript = 'zap-full-scan.py'
+                            reportFile = 'zap_full_report.html'
+                        }
+
+                        def status = sh(script: '''
+                        docker run -v $PWD:/zap/wrk/:rw -t ghcr.io/zaproxy/zaproxy:stable \
+                        ''' + zapScript + ''' -t http://ben.jonathanjo.great-site.net > ''' + reportFile, returnStatus: true)
+
+                        archiveArtifacts artifacts: '*.html', allowEmptyArchive: true
+                    }
+                }
+            }
+        }
     } 
 
     post {
-        always {
-            script {
-                // Define email content
-                def subject = "Build #${env.BUILD_NUMBER} - ${currentBuild.currentResult}"
-                def body = """
-                <p>Build Status: ${currentBuild.currentResult}</p>
-                <p>Commit ID: ${env.GIT_COMMIT}</p>
-                <p>Build Link: <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
-                <p>Triggered By: ${env.BUILD_USER}</p>
-                <p>Reports:</p>
-                <ul>
-                    <li><a href="${env.BUILD_URL}artifact/hadolint_report.txt">Hadolint Report</a></li>
-                    <li><a href="${env.BUILD_URL}artifact/trivy_report.pdf">Trivy Report</a></li>
-                    <li><a href="${env.BUILD_URL}artifact/dependency-check-report.xml">OWASP Dependency Check Report</a></li>
-                </ul>
-                """
+    always {
+        script {
+            // Define email content
+            def subject = "Build #${env.BUILD_NUMBER} - ${currentBuild.currentResult}"
+            def body = """
+            <p>Build Status: ${currentBuild.currentResult}</p>
+            <p>Commit ID: ${env.GIT_COMMIT}</p>
+            <p>Build Link: <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
+            <p>Triggered By: ${env.BUILD_USER}</p>
+            <p>Reports:</p>
+            <ul>
+                <li><a href="${env.BUILD_URL}artifact/hadolint_report.txt">Hadolint Report</a></li>
+                <li><a href="${env.BUILD_URL}artifact/trivy_report.pdf">Trivy Report</a></li>
+                <li><a href="${env.BUILD_URL}artifact/dependency-check-report.xml">OWASP Dependency Check Report</a></li>
+            </ul>
+            """
 
-                // Send email notification
-                emailext(
-                    to: EMAIL_RECIPIENTS,
-                    subject: subject,
-                    body: body,
-                    mimeType: 'text/html'
-                )
+            // Send email notification
+            emailext(
+                to: EMAIL_RECIPIENTS,
+                subject: subject,
+                body: body,
+                mimeType: 'text/html',
+                attachmentsPattern: '**/hadolint_report.txt, **/trivy-report.pdf, **/dependency-check-report.xml, **/zap_baseline_report.html'
+            )
 
-                // Send Slack notification
-                slackSend(channel: SLACK_CHANNEL, 
-                          message: "Build *#${env.BUILD_NUMBER}* - ${currentBuild.currentResult} \n" +
-                                   "Commit ID: `${env.GIT_COMMIT}` \n" +
-                                   "Build Link: <${env.BUILD_URL}|Click here> \n" +
-                                   "Triggered By: ${env.BUILD_USER}", 
-                          credentialsId: SLACK_CREDENTIALS_ID)
-            }
+            // Send Slack notification
+            slackSend(channel: SLACK_CHANNEL, 
+                      message: "Build *#${env.BUILD_NUMBER}* - ${currentBuild.currentResult} \n" +
+                               "Commit ID: `${env.GIT_COMMIT}` \n" +
+                               "Build Link: <${env.BUILD_URL}|Click here> \n" +
+                               "Triggered By: ${env.BUILD_USER}", 
+                      credentialsId: SLACK_CREDENTIALS_ID)
         }
     }
 }
 
-def waitForQualityGate() {
-    timeout(time: 1, unit: 'HOURS') {
-        def result
-        retry(5) {
-            result = sh(script: "curl -s -u ${env.SONAR_TOKEN}: http://65.0.133.89:9000/api/qualitygates/project_status?projectKey=Petclinic", returnStdout: true)
-            def json = readJSON(text: result)
-            if (json.projectStatus.status != 'OK') {
-                error "SonarQube Quality Gate failed with status: ${json.projectStatus.status}"
-            }
-            return json.projectStatus
-        }
-    }
 }
+
+// def waitForQualityGate() {
+//     timeout(time: 1, unit: 'HOURS') {
+//         def result
+//         retry(5) {
+//             result = sh(script: "curl -s -u ${env.SONAR_TOKEN}: http://65.0.133.89:9000/api/qualitygates/project_status?projectKey=Petclinic", returnStdout: true)
+//             def json = readJSON(text: result)
+//             if (json.projectStatus.status != 'OK') {
+//                 error "SonarQube Quality Gate failed with status: ${json.projectStatus.status}"
+//             }
+//             return json.projectStatus
+//         }
+//     }
+// }
