@@ -114,7 +114,7 @@ pipeline {
           stage('Docker Image Vulnerability Scanning') {
             steps {
                 script {
-                    sh 'trivy image --severity HIGH,CRITICAL --format table ${DOCKER_IMAGE}:${DOCKER_TAG} > trivy-report.txt'
+                    sh 'trivy image --scanners vuln --severity HIGH,CRITICAL --format table ${DOCKER_IMAGE}:${DOCKER_TAG} > trivy-report.txt'
                     sh 'libreoffice --headless --convert-to pdf trivy-report.txt --outdir .'
                     archiveArtifacts artifacts: 'trivy-report.pdf', allowEmptyArchive: false
                 }
@@ -180,6 +180,7 @@ pipeline {
             <ul>
                 <li><a href="${env.BUILD_URL}artifact/hadolint_report.txt">Hadolint Report</a></li>
                 <li><a href="${env.BUILD_URL}artifact/trivy_report.pdf">Trivy Report</a></li>
+                <li><a href="${env.BUILD_URL}artifact/zap_baseline_report.html">zap_baseline_reportt</a></li>
                 <li><a href="${env.BUILD_URL}artifact/dependency-check-report.xml">OWASP Dependency Check Report</a></li>
             </ul>
             """
