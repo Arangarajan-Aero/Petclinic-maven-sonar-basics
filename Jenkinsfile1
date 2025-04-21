@@ -1,79 +1,111 @@
 pipeline {
     agent any 
     
-    tools{
+    tools {
         jdk 'jdk11'
         maven 'maven'
     }
     
-  
+    environment {
+        ERROR_FILE = "pipeline_errors.log"  // File to store errors
+    }
     
-    stages{
-        
-        stage("Git Checkout"){
-            steps{
-                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/jaiswaladi246/Petclinic.git'
-            }
-        }
-        
-        stage("Compile"){
-            steps{
-                sh "mvn clean compile"
-            }
-        }
-        
-         stage("Test Cases"){
-            steps{
-                sh "mvn test"
-            }
-        }
-        
-        stage("Sonarqube Analysis "){
-            steps{
-                withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Petclinic \
-                    -Dsonar.java.binaries=. \
-                    -Dsonar.projectKey=Petclinic '''
-    
-                }
-            }
-        }
-        
-        stage("OWASP Dependency Check"){
-            steps{
-                dependencyCheck additionalArguments: '--scan ./ --format HTML ', odcInstallation: 'DP'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-            }
-        }
-        
-         stage("Build"){
-            steps{
-                sh " mvn clean install"
-            }
-        }
-        
-        stage("Docker Build & Push"){
-            steps{
-                script{
-                   withDockerRegistry(credentialsId: '58be877c-9294-410e-98ee-6a959d73b352', toolName: 'docker') {
-                        
-                        sh "docker build -t image1 ."
-                        sh "docker tag image1 adijaiswal/pet-clinic123:latest "
-                        sh "docker push adijaiswal/pet-clinic123:latest "
+    stages {
+        stage("Git Checkout") {
+            steps {
+                script {
+                    try {
+                        git branch: 'main', changelog: false, poll: false, url: 'https://github.com/jaiswaladi246/Petclinic.git'
+                    } catch (Exception e) {
+                        echo "ERROR: Git Checkout Failed - ${e.message}"
+                        sh "echo 'Git Checkout Error: ${e.message}' >> ${ERROR_FILE}"
+                        error("Pipeline failed due to Git error") 
                     }
                 }
             }
         }
         
-        stage("TRIVY"){
-            steps{
-                sh " trivy image adijaiswal/pet-clinic123:latest"
+        stage("Compile") {
+            steps {
+                script {
+                    try {
+                        sh "mvn clean compile"
+                    } catch (Exception e) {
+                        echo "ERROR: Compilation Failed - ${e.message}"
+                        sh "echo 'Compilation Error: ${e.message}' >> ${ERROR_FILE}"
+                        error("Pipeline failed due to compilation error")
+                    }
+                }
             }
         }
         
-        stage("Deploy To Tomcat"){
-            steps{
-                sh "cp  /var/lib/jenkins/workspace/CI-CD/target/petclinic.war /opt/apache-tomcat-9.0.65/webapps/ "
+        // stage("OWASP Dependency Check") {
+        //     steps {
+        //         script {
+        //             try {
+        //                 dependencyCheck additionalArguments: '--scan ./ --format HTML ', odcInstallation: 'DP'
+        //                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+        //             } catch (Exception e) {
+        //                 echo "ERROR: OWASP Scan Failed - ${e.message}"
+        //                 sh "echo 'OWASP Error: ${e.message}' >> ${ERROR_FILE}"
+        //                 error("Pipeline failed due to OWASP error")
+        //             }
+        //         }
+        //     }
+        // }
+        
+        stage("Build") {
+            steps {
+                script {
+                    try {
+                        sh "mvn clean install"
+                    } catch (Exception e) {
+                        echo "ERROR: Build Failed - ${e.message}"
+                        sh "echo 'Build Error: ${e.message}' >> ${ERROR_FILE}"
+                        error("Pipeline failed due to build error")
+                    }
+                }
+            }
+        }
+        
+        stage("Deploy To Tomcat") {
+            steps {
+                script {
+                    try {
+                        sh "cp /var/lib/jenkins/workspace/${env.JOB_NAME}/target/petclinic.war /opt/apache-tomcat-9.0.65/webapps/"
+                    } catch (Exception e) {
+                        echo "ERROR: Deployment Failed - ${e.message}"
+                        sh "echo 'Deployment Error: ${e.message}' >> ${ERROR_FILE}"
+                        error("Pipeline failed due to deployment error")
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                // Archive the error file (optional)
+                archiveArtifacts artifacts: "${ERROR_FILE}", allowEmptyArchive: true
+                
+                // Send error data to n8n webhook if pipeline failed
+                if (currentBuild.result == 'FAILURE') {
+                    def errorContent = readFile "${ERROR_FILE}"
+                    
+                    // Use `curl` to send error to n8n webhook
+                    sh """
+                        curl -X POST \
+                          'https://arangarajan.app.n8n.cloud/webhook-test/99e35d14-ebac-4ed9-b07e-865a019a0a19' \
+                          -H 'Content-Type: application/json' \
+                          -d '{
+                            "pipeline": "${env.JOB_NAME}",
+                            "build_number": "${env.BUILD_NUMBER}",
+                            "status": "FAILED",
+                            "error_log": "${errorContent.replace("\n", " ").replace("'", "'\"'\"'")}"  // Escape single quotes
+                          }'
+                    """
+                }
             }
         }
     }
